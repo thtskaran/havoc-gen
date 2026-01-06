@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime
 from flask import Flask, jsonify, request
+from flask_socketio import SocketIO, emit
 from concurrent.futures import ThreadPoolExecutor
 import queue
 import json
@@ -18,14 +19,31 @@ import warnings
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'production-monitoring-secret'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Configure logging with detailed format
+# Custom logging handler to stream logs via WebSocket
+class WebSocketHandler(logging.Handler):
+    def emit(self, record):
+        log_entry = self.format(record)
+        try:
+            socketio.emit('log', {
+                'timestamp': datetime.now().isoformat(),
+                'level': record.levelname,
+                'message': log_entry,
+                'thread': record.threadName
+            }, namespace='/')
+        except:
+            pass
+
+# Configure logging with WebSocket handler
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(threadName)s-%(thread)d] - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('production_issues.log')
+        logging.FileHandler('production_issues.log'),
+        WebSocketHandler()
     ]
 )
 
@@ -37,6 +55,10 @@ lock_a = threading.Lock()
 lock_b = threading.Lock()
 shared_queue = queue.Queue(maxsize=10)
 memory_leak_list = []
+
+# Auto-generation control
+auto_generation_active = True
+auto_generation_thread = None
 
 class DatabaseSimulator:
     """Simulates database connection issues"""
@@ -59,13 +81,30 @@ class DatabaseSimulator:
 
 db = DatabaseSimulator()
 
+def normal_operation_logs():
+    """Generate normal operational logs"""
+    operations = [
+        lambda: logger.info("User authentication successful"),
+        lambda: logger.info(f"Processing order #{random.randint(1000, 9999)}"),
+        lambda: logger.debug(f"Cache hit for key: user_{random.randint(1, 1000)}"),
+        lambda: logger.info(f"API request completed in {random.randint(10, 200)}ms"),
+        lambda: logger.debug(f"Database query executed: SELECT * FROM users WHERE id={random.randint(1, 1000)}"),
+        lambda: logger.info(f"Email sent to user@example.com"),
+        lambda: logger.info(f"Payment processed successfully: ${random.randint(10, 500)}.{random.randint(0, 99):02d}"),
+        lambda: logger.debug(f"Session created for user_{random.randint(1, 1000)}"),
+        lambda: logger.info(f"File uploaded: document_{random.randint(1, 100)}.pdf"),
+        lambda: logger.info(f"Report generated in {random.randint(1, 10)} seconds"),
+    ]
+    
+    random.choice(operations)()
+
 def race_condition_scenario():
     """Simulates race condition on shared counter"""
     global shared_counter
     logger.warning("RACE CONDITION: Multiple threads accessing shared counter without proper locking")
     
     temp = shared_counter
-    time.sleep(random.uniform(0.001, 0.01))  # Simulate processing
+    time.sleep(random.uniform(0.001, 0.01))
     shared_counter = temp + 1
     
     logger.debug(f"Counter updated to: {shared_counter} by {threading.current_thread().name}")
@@ -104,7 +143,7 @@ def memory_leak_scenario():
     
     if len(memory_leak_list) > 100:
         logger.critical(f"MEMORY LEAK CRITICAL: {len(memory_leak_list)} chunks accumulated!")
-        memory_leak_list.clear()  # Reset to prevent actual memory issues
+        memory_leak_list.clear()
 
 def null_pointer_scenario():
     """Simulates null/None reference errors"""
@@ -172,10 +211,10 @@ def index_out_of_bounds_scenario():
 def json_parse_error_scenario():
     """Simulates JSON parsing errors"""
     malformed_json = random.choice([
-        '{"key": "value"',  # Missing closing brace
-        '{"key": undefined}',  # Invalid value
-        "{'key': 'value'}",  # Single quotes
-        '{"key": "value",}',  # Trailing comma
+        '{"key": "value"',
+        '{"key": undefined}',
+        "{'key': 'value'}",
+        '{"key": "value",}',
     ])
     
     try:
@@ -199,7 +238,6 @@ def ml_model_dimension_mismatch():
     """Simulates dimension mismatch in ML models"""
     logger.info("ML: Training model with proper dimensions")
     
-    # Train model with specific feature count
     X_train = np.random.rand(100, 5)
     y_train = np.random.randint(0, 2, 100)
     
@@ -207,7 +245,6 @@ def ml_model_dimension_mismatch():
     model.fit(X_train, y_train)
     logger.debug(f"ML: Model trained successfully with {X_train.shape[1]} features")
     
-    # Try to predict with wrong number of features
     wrong_features = random.choice([3, 7, 10])
     X_test = np.random.rand(1, wrong_features)
     
@@ -222,10 +259,8 @@ def ml_model_nan_infinity():
     """Simulates NaN and infinity values in ML pipeline"""
     logger.info("ML: Processing data with potential NaN/Inf values")
     
-    # Create dataset with problematic values
     X = np.random.rand(100, 4)
     
-    # Inject NaN and Inf values
     if random.random() > 0.5:
         X[random.randint(0, 99), random.randint(0, 3)] = np.nan
         logger.warning("ML DATA QUALITY: NaN values detected in dataset")
@@ -247,29 +282,6 @@ def ml_model_nan_infinity():
     except ValueError as e:
         logger.error(f"ML TRAINING FAILURE: NaN/Inf values caused training failure - {e}")
 
-def ml_model_convergence_failure():
-    """Simulates model convergence issues"""
-    logger.info("ML: Training model with convergence challenges")
-    
-    # Create difficult dataset
-    X = np.random.rand(50, 20)  # Small dataset, many features
-    y = np.random.rand(50)
-    
-    from sklearn.linear_model import SGDRegressor
-    
-    model = SGDRegressor(max_iter=5, tol=1e-10, random_state=42)
-    
-    try:
-        logger.debug("ML: Starting model training with strict convergence criteria")
-        model.fit(X, y)
-        
-        if not hasattr(model, 'n_iter_') or model.n_iter_ >= 5:
-            logger.warning("ML CONVERGENCE WARNING: Model did not converge within iteration limit")
-        else:
-            logger.info(f"ML: Model converged in {model.n_iter_} iterations")
-    except Exception as e:
-        logger.error(f"ML CONVERGENCE FAILURE: {e}")
-
 def ml_overfitting_scenario():
     """Simulates overfitting detection"""
     logger.info("ML: Detecting potential overfitting")
@@ -279,7 +291,6 @@ def ml_overfitting_scenario():
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
     
-    # Create overly complex model
     model = RandomForestClassifier(n_estimators=100, max_depth=None, min_samples_split=2, random_state=42)
     model.fit(X_train, y_train)
     
@@ -294,337 +305,85 @@ def ml_overfitting_scenario():
     else:
         logger.info("ML: Model generalization appears healthy")
 
-def ml_data_leakage_scenario():
-    """Simulates data leakage in preprocessing"""
-    logger.info("ML: Preprocessing pipeline with potential data leakage")
+# Auto-generation function
+def auto_generate_logs():
+    """Automatically generates logs at random intervals"""
+    global auto_generation_active
     
-    X = np.random.rand(100, 5)
-    y = np.random.randint(0, 2, 100)
-    
-    # WRONG: Scaling before split (data leakage)
-    logger.warning("ML DATA LEAKAGE: Scaling entire dataset before train/test split")
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.3, random_state=42)
-    
-    model = RandomForestClassifier(random_state=42)
-    model.fit(X_train, y_train)
-    
-    test_score = model.score(X_test, y_test)
-    logger.error(f"ML DATA LEAKAGE: Test score {test_score:.4f} may be artificially inflated due to leakage")
-
-def ml_class_imbalance_scenario():
-    """Simulates class imbalance issues"""
-    logger.info("ML: Training on imbalanced dataset")
-    
-    # Create highly imbalanced dataset
-    n_majority = 950
-    n_minority = 50
-    
-    X_majority = np.random.rand(n_majority, 5)
-    y_majority = np.zeros(n_majority)
-    
-    X_minority = np.random.rand(n_minority, 5)
-    y_minority = np.ones(n_minority)
-    
-    X = np.vstack([X_majority, X_minority])
-    y = np.hstack([y_majority, y_minority])
-    
-    logger.warning(f"ML CLASS IMBALANCE: Dataset has {n_majority} majority samples and {n_minority} minority samples (ratio: {n_majority/n_minority:.1f}:1)")
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-    
-    model = RandomForestClassifier(random_state=42)
-    model.fit(X_train, y_train)
-    
-    train_predictions = model.predict(X_train)
-    minority_predicted = np.sum(train_predictions == 1)
-    
-    if minority_predicted < n_minority * 0.3:
-        logger.error(f"ML CLASS IMBALANCE IMPACT: Model only predicts {minority_predicted} minority class samples, likely biased toward majority")
-
-def ml_model_serialization_failure():
-    """Simulates model serialization/deserialization issues"""
-    logger.info("ML: Testing model serialization")
-    
-    X = np.random.rand(100, 5)
-    y = np.random.randint(0, 2, 100)
-    
-    model = GradientBoostingRegressor(n_estimators=50, random_state=42)
-    model.fit(X, y)
-    
-    try:
-        # Serialize model
-        logger.debug("ML: Serializing model to bytes")
-        model_bytes = pickle.dumps(model)
-        logger.info(f"ML: Model serialized successfully, size: {len(model_bytes)} bytes")
-        
-        # Corrupt serialized model randomly
-        if random.random() > 0.6:
-            logger.warning("ML SERIALIZATION: Simulating corrupted model file")
-            corrupt_index = random.randint(0, len(model_bytes) - 1)
-            model_bytes = model_bytes[:corrupt_index] + b'\x00' + model_bytes[corrupt_index+1:]
-        
-        # Deserialize
-        logger.debug("ML: Deserializing model from bytes")
-        loaded_model = pickle.loads(model_bytes)
-        
-        # Try to predict
-        X_test = np.random.rand(5, 5)
-        predictions = loaded_model.predict(X_test)
-        logger.info("ML: Model loaded and predictions successful")
-        
-    except (pickle.UnpicklingError, AttributeError, EOFError) as e:
-        logger.error(f"ML DESERIALIZATION FAILURE: Corrupted model file - {type(e).__name__}: {e}")
-    except Exception as e:
-        logger.exception(f"ML SERIALIZATION ERROR: {e}")
-
-def ml_feature_scaling_mismatch():
-    """Simulates feature scaling inconsistencies between train and inference"""
-    logger.info("ML: Testing feature scaling consistency")
-    
-    # Training phase
-    X_train = np.random.rand(100, 4) * 100  # Scale 0-100
-    y_train = np.random.rand(100)
-    
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    
-    model = LinearRegression()
-    model.fit(X_train_scaled, y_train)
-    logger.debug("ML: Model trained with scaled features")
-    
-    # Inference phase - forgot to scale or used different scaler
-    if random.random() > 0.5:
-        logger.warning("ML SCALING MISMATCH: Predicting on unscaled data")
-        X_test = np.random.rand(1, 4) * 100  # Unscaled
-    else:
-        logger.warning("ML SCALING MISMATCH: Using different scaler parameters")
-        wrong_scaler = StandardScaler()
-        X_test = np.random.rand(10, 4) * 50  # Different scale
-        X_test = wrong_scaler.fit_transform(X_test)[:1]
-    
-    try:
-        prediction = model.predict(X_test)
-        logger.error(f"ML SCALING ERROR: Prediction made on incorrectly scaled data: {prediction[0]:.4f}")
-    except Exception as e:
-        logger.error(f"ML PREDICTION FAILURE: {e}")
-
-def ml_memory_explosion():
-    """Simulates memory issues with large ML operations"""
-    logger.info("ML: Processing large dataset")
-    
-    # Try to create increasingly large matrices
-    size = random.choice([5000, 10000, 20000])
-    features = random.choice([100, 500, 1000])
-    
-    try:
-        logger.debug(f"ML: Allocating {size}x{features} matrix ({size*features*8/1e6:.1f} MB)")
-        X = np.random.rand(size, features)
-        
-        logger.debug("ML: Computing correlation matrix")
-        correlation = np.corrcoef(X.T)
-        
-        logger.debug("ML: Training ensemble model")
-        y = np.random.randint(0, 2, size)
-        model = RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)
-        model.fit(X, y)
-        
-        logger.info(f"ML: Successfully processed large dataset ({size} samples)")
-        
-    except MemoryError as e:
-        logger.critical(f"ML MEMORY EXHAUSTION: Failed to allocate memory for {size}x{features} dataset - {e}")
-    except Exception as e:
-        logger.error(f"ML PROCESSING FAILURE: {e}")
-
-def ml_prediction_service_failure():
-    """Simulates production ML prediction service failures"""
-    logger.info("ML PRODUCTION: Handling prediction request")
-    
-    # Simulate model loading
-    if random.random() > 0.85:
-        logger.critical("ML PRODUCTION: Model file not found or corrupted")
-        raise FileNotFoundError("Model file 'production_model.pkl' not found")
-    
-    # Simulate input validation
-    input_data = np.random.rand(1, random.choice([4, 5, 6]))
-    expected_features = 5
-    
-    if input_data.shape[1] != expected_features:
-        logger.error(f"ML PRODUCTION: Input validation failed - expected {expected_features} features, got {input_data.shape[1]}")
-        raise ValueError(f"Invalid input shape: {input_data.shape}")
-    
-    # Simulate prediction latency issues
-    start_time = time.time()
-    time.sleep(random.uniform(0.01, 0.15))
-    elapsed = time.time() - start_time
-    
-    if elapsed > 0.1:
-        logger.warning(f"ML PRODUCTION: Slow prediction - {elapsed*1000:.0f}ms (SLA: 100ms)")
-    
-    # Simulate prediction errors
-    if random.random() > 0.9:
-        logger.error("ML PRODUCTION: Model returned invalid prediction (NaN)")
-        raise ValueError("Model output contains NaN values")
-    
-    logger.info(f"ML PRODUCTION: Prediction completed in {elapsed*1000:.1f}ms")
-
-@app.route('/trigger-issue')
-def trigger_random_issue():
-    """Endpoint that triggers random issues"""
-    scenarios = [
-        ("race_condition", race_condition_scenario),
-        ("deadlock", deadlock_scenario),
-        ("memory_leak", memory_leak_scenario),
-        ("null_pointer", null_pointer_scenario),
-        ("resource_exhaustion", resource_exhaustion_scenario),
-        ("timeout", timeout_scenario),
-        ("divide_by_zero", divide_by_zero_scenario),
-        ("index_out_of_bounds", index_out_of_bounds_scenario),
-        ("json_parse_error", json_parse_error_scenario),
-        ("queue_overflow", queue_overflow_scenario),
-        ("ml_dimension_mismatch", ml_model_dimension_mismatch),
-        ("ml_nan_infinity", ml_model_nan_infinity),
-        ("ml_convergence_failure", ml_model_convergence_failure),
-        ("ml_overfitting", ml_overfitting_scenario),
-        ("ml_data_leakage", ml_data_leakage_scenario),
-        ("ml_class_imbalance", ml_class_imbalance_scenario),
-        ("ml_serialization_failure", ml_model_serialization_failure),
-        ("ml_scaling_mismatch", ml_feature_scaling_mismatch),
-        ("ml_memory_explosion", ml_memory_explosion),
-        ("ml_prediction_service_failure", ml_prediction_service_failure)
+    error_scenarios = [
+        race_condition_scenario,
+        deadlock_scenario,
+        memory_leak_scenario,
+        null_pointer_scenario,
+        resource_exhaustion_scenario,
+        timeout_scenario,
+        divide_by_zero_scenario,
+        index_out_of_bounds_scenario,
+        json_parse_error_scenario,
+        queue_overflow_scenario,
+        ml_model_dimension_mismatch,
+        ml_model_nan_infinity,
+        ml_overfitting_scenario,
     ]
     
-    issue_name, scenario_func = random.choice(scenarios)
+    logger.info("🚀 AUTO-GENERATION: Started automatic log generation")
     
-    logger.info(f"=== Triggering issue: {issue_name} ===")
-    
-    try:
-        scenario_func()
-        return jsonify({"status": "triggered", "issue": issue_name}), 200
-    except Exception as e:
-        logger.exception(f"Unhandled exception in {issue_name}: {e}")
-        return jsonify({"status": "error", "issue": issue_name, "error": str(e)}), 500
-
-@app.route('/concurrent-issues')
-def trigger_concurrent_issues():
-    """Triggers multiple issues concurrently to simulate high load"""
-    num_threads = random.randint(5, 15)
-    logger.info(f"=== Triggering {num_threads} concurrent issues ===")
-    
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(trigger_random_issue) for _ in range(num_threads)]
-        
-    return jsonify({"status": "concurrent_issues_triggered", "count": num_threads}), 200
-
-@app.route('/butterfly-effect')
-def butterfly_effect():
-    """Simulates butterfly effect - small change causing cascading failures"""
-    logger.info("=== BUTTERFLY EFFECT: Small issue cascading into multiple failures ===")
-    
-    # Start with a small issue
-    logger.debug("Initial condition: Minor delay in processing")
-    time.sleep(0.1)
-    
-    # Cascade 1: Causes timeout
-    logger.warning("Cascade 1: Delay causes timeout in dependent service")
-    try:
-        timeout_scenario()
-    except:
-        pass
-    
-    # Cascade 2: Timeout causes retry storm
-    logger.warning("Cascade 2: Timeout triggers retry storm")
-    for i in range(5):
-        logger.error(f"Retry attempt {i+1}/5 failed")
-        time.sleep(0.05)
-    
-    # Cascade 3: Retry storm exhausts connection pool
-    logger.critical("Cascade 3: Retry storm exhausts connection pool")
-    try:
-        for _ in range(10):
-            db.get_connection()
-    except Exception as e:
-        logger.critical(f"System destabilized: {e}")
-    
-    return jsonify({"status": "butterfly_effect_complete"}), 200
-
-@app.route('/ml-pipeline-failure')
-def ml_pipeline_failure():
-    """Simulates complete ML pipeline failure cascade"""
-    logger.critical("=== ML PIPELINE FAILURE: End-to-end failure simulation ===")
-    
-    try:
-        # Stage 1: Data loading issues
-        logger.info("ML Pipeline Stage 1: Data Loading")
-        if random.random() > 0.7:
-            raise FileNotFoundError("Training data file not found")
-        
-        # Stage 2: Data quality issues
-        logger.info("ML Pipeline Stage 2: Data Validation")
-        ml_model_nan_infinity()
-        
-        # Stage 3: Feature engineering failure
-        logger.info("ML Pipeline Stage 3: Feature Engineering")
-        if random.random() > 0.6:
-            logger.error("ML PIPELINE: Feature extraction failed - missing required columns")
-            raise KeyError("Required feature 'user_age' not found in dataset")
-        
-        # Stage 4: Training failure
-        logger.info("ML Pipeline Stage 4: Model Training")
-        ml_model_convergence_failure()
-        
-        # Stage 5: Validation failure
-        logger.info("ML Pipeline Stage 5: Model Validation")
-        ml_overfitting_scenario()
-        
-        # Stage 6: Serialization failure
-        logger.info("ML Pipeline Stage 6: Model Persistence")
-        ml_model_serialization_failure()
-        
-        logger.info("ML PIPELINE: Completed with warnings")
-        return jsonify({"status": "completed_with_warnings"}), 200
-        
-    except Exception as e:
-        logger.critical(f"ML PIPELINE CATASTROPHIC FAILURE: {type(e).__name__}: {e}")
-        return jsonify({"status": "pipeline_failed", "error": str(e)}), 500
-
-@app.route('/ml-training-job')
-def ml_training_job():
-    """Simulates a long-running ML training job with various issues"""
-    logger.info("=== ML TRAINING JOB: Starting distributed training ===")
-    
-    def training_worker(worker_id):
+    while auto_generation_active:
         try:
-            logger.info(f"ML WORKER-{worker_id}: Starting training")
-            time.sleep(random.uniform(0.1, 0.3))
+            # Generate 1-3 logs per iteration
+            num_logs = random.randint(1, 3)
             
-            if random.random() > 0.7:
-                logger.error(f"ML WORKER-{worker_id}: OOM Error during gradient computation")
-                raise MemoryError(f"Worker {worker_id} ran out of memory")
+            for _ in range(num_logs):
+                # 70% chance of normal logs, 30% chance of errors
+                if random.random() < 0.7:
+                    normal_operation_logs()
+                else:
+                    scenario = random.choice(error_scenarios)
+                    try:
+                        scenario()
+                    except Exception as e:
+                        logger.exception(f"Error in scenario execution: {e}")
             
-            if random.random() > 0.8:
-                logger.error(f"ML WORKER-{worker_id}: GPU out of memory")
-                raise RuntimeError(f"CUDA out of memory on worker {worker_id}")
-            
-            logger.info(f"ML WORKER-{worker_id}: Completed epoch")
+            # Wait between 0.5 to 3 seconds before next batch
+            time.sleep(random.uniform(0.5, 3.0))
             
         except Exception as e:
-            logger.exception(f"ML WORKER-{worker_id}: Training failed - {e}")
+            logger.exception(f"Error in auto-generation loop: {e}")
+            time.sleep(1)
     
-    # Simulate distributed training
-    workers = []
-    for i in range(4):
-        worker = threading.Thread(target=training_worker, args=(i,), daemon=True)
-        worker.start()
-        workers.append(worker)
-    
-    for worker in workers:
-        worker.join()
-    
-    logger.info("=== ML TRAINING JOB: Completed ===")
-    return jsonify({"status": "training_completed"}), 200
+    logger.info("🛑 AUTO-GENERATION: Stopped automatic log generation")
+
+# WebSocket event handlers
+@socketio.on('connect')
+def handle_connect():
+    logger.info(f"🔌 Client connected: {request.sid}")
+    emit('status', {'message': 'Connected to log stream', 'status': 'active'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info(f"🔌 Client disconnected: {request.sid}")
+
+@socketio.on('ping')
+def handle_ping():
+    emit('pong', {'timestamp': datetime.now().isoformat()})
+
+# HTTP Endpoints
+@app.route('/')
+def index():
+    return jsonify({
+        "service": "Production Issues Simulator",
+        "version": "2.0",
+        "features": [
+            "Real-time log streaming via WebSocket",
+            "Automatic log generation",
+            "Manual trigger endpoints"
+        ],
+        "websocket_url": "/socket.io",
+        "auto_generation": "active" if auto_generation_active else "inactive"
+    }), 200
+
+@app.route('/health')
+def health():
     """Health check endpoint"""
     logger.info("Health check requested")
     return jsonify({
@@ -632,25 +391,52 @@ def ml_training_job():
         "counter": shared_counter,
         "db_connections": db.connection_count,
         "queue_size": shared_queue.qsize(),
-        "memory_chunks": len(memory_leak_list)
+        "memory_chunks": len(memory_leak_list),
+        "auto_generation": auto_generation_active
     }), 200
 
-@app.route('/chaos')
-def chaos_mode():
-    """Continuous chaos mode - keeps generating issues"""
-    duration = int(request.args.get('duration', 10))
-    logger.critical(f"=== CHAOS MODE ACTIVATED: {duration} seconds ===")
+@app.route('/auto-generation/start')
+def start_auto_generation():
+    """Start automatic log generation"""
+    global auto_generation_active, auto_generation_thread
     
-    def run_chaos():
-        end_time = time.time() + duration
-        while time.time() < end_time:
-            trigger_random_issue()
-            time.sleep(random.uniform(0.1, 0.5))
-        logger.critical("=== CHAOS MODE ENDED ===")
+    if auto_generation_active and auto_generation_thread and auto_generation_thread.is_alive():
+        return jsonify({"status": "already_running"}), 200
     
-    threading.Thread(target=run_chaos, daemon=True).start()
+    auto_generation_active = True
+    auto_generation_thread = threading.Thread(target=auto_generate_logs, daemon=True)
+    auto_generation_thread.start()
     
-    return jsonify({"status": "chaos_mode_activated", "duration": duration}), 200
+    logger.info("🚀 AUTO-GENERATION: Started via API")
+    return jsonify({"status": "started"}), 200
+
+@app.route('/auto-generation/stop')
+def stop_auto_generation():
+    """Stop automatic log generation"""
+    global auto_generation_active
+    
+    auto_generation_active = False
+    logger.info("🛑 AUTO-GENERATION: Stopped via API")
+    
+    return jsonify({"status": "stopped"}), 200
+
+@app.route('/auto-generation/status')
+def auto_generation_status():
+    """Check auto-generation status"""
+    return jsonify({
+        "active": auto_generation_active,
+        "thread_alive": auto_generation_thread.is_alive() if auto_generation_thread else False
+    }), 200
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    # Start auto-generation on startup
+    auto_generation_thread = threading.Thread(target=auto_generate_logs, daemon=True)
+    auto_generation_thread.start()
+    
+    logger.info("="*60)
+    logger.info("🚀 Production Issues Simulator Starting")
+    logger.info("WebSocket endpoint: ws://localhost:5000/socket.io")
+    logger.info("Auto-generation: ENABLED")
+    logger.info("="*60)
+    
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
